@@ -3,27 +3,18 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
-from plotly.subplots import make_subplots
+from io import BytesIO
 import openai
 from datetime import datetime
-import io
-import xlsxwriter
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment
-import base64
-import json
 
-# Configure page
+# --- Page configuration & CSS ---
 st.set_page_config(
-    page_title="Variance Analysis AI Copilot",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    page_title="📊 Variance Analysis AI Copilot",
+    layout="wide"
 )
-
-# Custom CSS for better styling
-st.markdown("""
-<style>
+st.markdown(
+    """
+    <style>
     .main-header {
         background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
         padding: 1rem;
@@ -32,654 +23,352 @@ st.markdown("""
         color: white;
         text-align: center;
     }
-    .metric-card {
-        background: white;
-        padding: 1rem;
-        border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        border-left: 4px solid #667eea;
-    }
-    .variance-positive {
-        color: #28a745;
-        font-weight: bold;
-    }
-    .variance-negative {
-        color: #dc3545;
-        font-weight: bold;
-    }
     .commentary-box {
         background: #f8f9fa;
-        padding: 1.5rem;
-        border-radius: 8px;
+        padding: 1rem;
         border-left: 4px solid #667eea;
         margin: 1rem 0;
     }
-</style>
-""", unsafe_allow_html=True)
+    </style>
+    """, unsafe_allow_html=True
+)
+st.markdown(
+    '<div class="main-header"><h1>📊 Variance Analysis AI Copilot</h1>' +
+    '<p>Transform your variance analysis with AI-powered insights</p></div>',
+    unsafe_allow_html=True
+)
 
-# Initialize session state
-if 'analysis_data' not in st.session_state:
-    st.session_state.analysis_data = None
+# --- Full-template generator ---
+def get_sample_template():
+    scenarios = ["Budget", "Actual", "Forecast"]
+    years     = [2024]
+    months    = ["Jan", "Feb", "Mar"]
+    products  = ["A", "B", "C", "D"]
+    regions   = ["North America", "Europe", "Asia", "South America"]
+    segments  = ["SMB", "Enterprise", "Consumer"]
+    channels  = ["Online", "Distributor", "Retail"]
+    rows = []
+    np.random.seed(42)
+    for sc in scenarios:
+        for yr in years:
+            for mo in months:
+                for prod in products:
+                    for reg in regions:
+                        for seg in segments:
+                            for ch in channels:
+                                rows.append({
+                                    "Scenario": sc,
+                                    "Year": yr,
+                                    "Month": mo,
+                                    "Product": prod,
+                                    "Region": reg,
+                                    "Customer Segment": seg,
+                                    "Channel": ch,
+                                    "Units Sold": np.random.randint(500, 2000),
+                                    "Price per Unit": round(np.random.uniform(20, 40), 2),
+                                    "FX Rate": round(np.random.uniform(0.8, 1.2), 2),
+                                    "COGS %": round(np.random.uniform(0.4, 0.7), 2),
+                                    "Operating Expenses": round(np.random.uniform(15000, 30000), 2),
+                                    "Depreciation": round(np.random.uniform(2000, 5000), 2),
+                                    "Tax Rate": 0.25
+                                })
+    return pd.DataFrame(rows)
+
+# --- Chart helpers ---
+def plot_bar(df, x_col, measure):
+    top = df.head(10)
+    colors = ['green' if v > 0 else 'red' for v in top['Variance_Absolute']]
+    fig = go.Figure(go.Bar(
+        x=top[x_col].astype(str),
+        y=top['Variance_Absolute'],
+        marker_color=colors
+    ))
+    fig.update_layout(
+        title=f"Top Variance Drivers ({measure})",
+        yaxis_title=f"{measure} Variance",
+        xaxis_title=x_col,
+        template='plotly_white'
+    )
+    return fig
+
+
+def plot_waterfall(df, a_col, b_col, x_col):
+    data = [{'Category': a_col, 'Value': df[a_col].sum(), 'Type': 'absolute'}]
+    for _, row in df.head(5).iterrows():
+        data.append({
+            'Category': row[x_col],
+            'Value': row['Variance_Absolute'],
+            'Type': 'relative'
+        })
+    data.append({'Category': b_col, 'Value': df[b_col].sum(), 'Type': 'absolute'})
+    dff = pd.DataFrame(data)
+    fig = go.Figure(go.Waterfall(
+        orientation='v',
+        measure=dff['Type'].tolist(),
+        x=dff['Category'],
+        y=dff['Value'],
+        connector={'line': {'color': 'rgb(63,63,63)'}}
+    ))
+    fig.update_layout(
+        title='Waterfall: Baseline to Comparison',
+        template='plotly_white'
+    )
+    return fig
+
+# --- Sidebar configuration ---
+st.sidebar.header("🔧 Configuration")
+api_key = st.sidebar.text_input(
+    "🔑 OpenAI API Key",
+    type="password",
+    help="Enter your OpenAI API key to enable AI commentary"
+)
+st.session_state.api_key = api_key
+
+st.sidebar.subheader("📋 Sample Data Template")
+if st.sidebar.button("📥 Download Full Template"):
+    df_full = get_sample_template()
+    buf = BytesIO()
+    df_full.to_excel(buf, index=False)
+    buf.seek(0)
+    st.sidebar.download_button(
+        "Download Full Template",
+        data=buf,
+        file_name="variance_full_template.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+uploaded = st.sidebar.file_uploader(
+    "📁 Upload Excel File",
+    type=["xlsx","xls"],
+    help="Upload your variance data"
+)
+
+# --- State init ---
 if 'analyzer' not in st.session_state:
     st.session_state.analyzer = None
+if 'var_df' not in st.session_state:
+    st.session_state.var_df = None
 if 'commentary' not in st.session_state:
     st.session_state.commentary = ""
-if 'openai_api_key' not in st.session_state:
-    st.session_state.openai_api_key = ""
-if 'analysis_complete' not in st.session_state:
-    st.session_state.analysis_complete = False
-if 'selected_columns' not in st.session_state:
-    st.session_state.selected_columns = {'budget': None, 'actual': None, 'groupby': []}
 
+# --- VarianceAnalyzer class ---
 class VarianceAnalyzer:
     def __init__(self):
         self.df = None
         self.variance_summary = None
-        
-    def load_data(self, uploaded_file):
-        """Load and validate Excel data"""
-        try:
-            self.df = pd.read_excel(uploaded_file)
-            return True, "Data loaded successfully!"
-        except Exception as e:
-            return False, f"Error loading data: {str(e)}"
-    
-    def calculate_variances(self, budget_col, actual_col, groupby_cols=None):
-        """Calculate absolute and percentage variances"""
-        try:
-            if groupby_cols:
-                # Group by specified columns
-                grouped = self.df.groupby(groupby_cols).agg({
-                    budget_col: 'sum',
-                    actual_col: 'sum'
-                }).reset_index()
-            else:
-                grouped = self.df.copy()
-            
-            # Calculate variances
-            grouped['Variance_Absolute'] = grouped[actual_col] - grouped[budget_col]
-            grouped['Variance_Percent'] = (grouped['Variance_Absolute'] / grouped[budget_col]) * 100
-            
-            # Calculate impact (absolute variance as % of total budget)
-            total_budget = grouped[budget_col].sum()
-            grouped['Impact_Percent'] = (grouped['Variance_Absolute'] / total_budget) * 100
-            
-            # Sort by absolute impact
-            grouped = grouped.reindex(grouped['Variance_Absolute'].abs().sort_values(ascending=False).index)
-            
-            self.variance_summary = grouped
-            return True, "Variance calculations completed!"
-        except Exception as e:
-            return False, f"Error calculating variances: {str(e)}"
-    
-    def get_top_drivers(self, n=5):
-        """Get top variance drivers"""
-        if self.variance_summary is None:
-            return pd.DataFrame()
-        
-        top_drivers = self.variance_summary.head(n).copy()
-        top_drivers['Driver_Type'] = top_drivers['Variance_Absolute'].apply(
-            lambda x: 'Favorable' if x > 0 else 'Unfavorable'
-        )
-        return top_drivers
-    
-    def generate_waterfall_data(self, budget_col, actual_col):
-        """Generate data for waterfall chart"""
-        if self.variance_summary is None:
-            return None
-        
-        # Get top positive and negative variances
-        top_positive = self.variance_summary[self.variance_summary['Variance_Absolute'] > 0].head(3)
-        top_negative = self.variance_summary[self.variance_summary['Variance_Absolute'] < 0].head(3)
-        
-        waterfall_data = []
-        
-        # Starting point
-        total_budget = self.variance_summary[budget_col].sum()
-        waterfall_data.append({
-            'Category': 'Budget',
-            'Value': total_budget,
-            'Type': 'absolute'
-        })
-        
-        # Add positive variances
-        for _, row in top_positive.iterrows():
-            category = row.iloc[0] if len(row) > 4 else 'Positive Variance'
-            waterfall_data.append({
-                'Category': f"{category}",
-                'Value': row['Variance_Absolute'],
-                'Type': 'positive'
-            })
-        
-        # Add negative variances
-        for _, row in top_negative.iterrows():
-            category = row.iloc[0] if len(row) > 4 else 'Negative Variance'
-            waterfall_data.append({
-                'Category': f"{category}",
-                'Value': row['Variance_Absolute'],
-                'Type': 'negative'
-            })
-        
-        # Ending point
-        total_actual = self.variance_summary[actual_col].sum()
-        waterfall_data.append({
-            'Category': 'Actual',
-            'Value': total_actual,
-            'Type': 'absolute'
-        })
-        
-        return pd.DataFrame(waterfall_data)
 
-class AICommentaryGenerator:
-    def __init__(self, api_key):
-        try:
-            self.client = openai.OpenAI(api_key=api_key)
-            print(f"DEBUG: API client initialized successfully")
-        except Exception as e:
-            print(f"DEBUG: API initialization failed: {str(e)}")
-            st.error(f"OpenAI API initialization failed: {str(e)}")
-            raise e
-    
-    def test_connection(self):
-        """Test API connection"""
-        try:
-            response = self.client.chat.completions.create(
-                model="gpt-4-turbo-preview",
-                messages=[{"role": "user", "content": "Hello"}],
-                max_tokens=5
-            )
-            return True, "Connection successful!"
-        except Exception as e:
-            return False, str(e)
-    
-    def generate_commentary(self, variance_data, scenario_type="YTD vs Budget", budget_col=None, actual_col=None):
-        """Generate AI commentary for variance analysis"""
-        try:
-            print(f"DEBUG: Starting commentary generation for {len(variance_data)} rows")
-            
-            # Prepare data summary for LLM
-            top_drivers = variance_data.head(5)
-            print(f"DEBUG: Top drivers shape: {top_drivers.shape}")
-            print(f"DEBUG: Top drivers columns: {top_drivers.columns.tolist()}")
-            
-            data_summary = []
-            for idx, row in top_drivers.iterrows():
-                print(f"DEBUG: Processing row {idx}: {row.to_dict()}")
-                
-                # Find the category column (first non-numeric column or first column)
-                category = 'Item'
-                budget = 0
-                actual = 0
-                
-                # Try to identify category from first column(s)
-                try:
-                    # Look for the first string/category column
-                    for col_idx, col_name in enumerate(row.index):
-                        if col_name not in ['Variance_Absolute', 'Variance_Percent', 'Impact_Percent']:
-                            col_value = row.iloc[col_idx]
-                            if isinstance(col_value, str) or pd.isna(col_value):
-                                category = str(col_value) if not pd.isna(col_value) else 'Item'
-                                break
-                except:
-                    category = 'Item'
-                
-                # Extract budget and actual values using column names if provided
-                try:
-                    if budget_col and budget_col in row.index:
-                        budget = float(row[budget_col]) if pd.notna(row[budget_col]) else 0
-                    else:
-                        # Try to find budget column by looking for numeric columns
-                        for col_name in row.index:
-                            if 'budget' in col_name.lower() or 'Budget' in col_name:
-                                budget = float(row[col_name]) if pd.notna(row[col_name]) else 0
-                                break
-                    
-                    if actual_col and actual_col in row.index:
-                        actual = float(row[actual_col]) if pd.notna(row[actual_col]) else 0
-                    else:
-                        # Try to find actual column by looking for numeric columns
-                        for col_name in row.index:
-                            if 'actual' in col_name.lower() or 'Actual' in col_name:
-                                actual = float(row[col_name]) if pd.notna(row[col_name]) else 0
-                                break
-                except Exception as e:
-                    print(f"DEBUG: Error extracting budget/actual: {e}")
-                    # Fallback: use variance to calculate approximate values
-                    variance_abs = float(row['Variance_Absolute']) if pd.notna(row['Variance_Absolute']) else 0
-                    if variance_abs != 0:
-                        # Estimate budget as actual minus variance
-                        actual = variance_abs + 100000  # Rough estimate
-                        budget = actual - variance_abs
-                    else:
-                        actual = 0
-                        budget = 0
-                
-                variance_abs = float(row['Variance_Absolute']) if pd.notna(row['Variance_Absolute']) else 0
-                variance_pct = float(row['Variance_Percent']) if pd.notna(row['Variance_Percent']) else 0
-                
-                data_summary.append(f"- {category}: Actual ${actual:,.0f} vs Budget ${budget:,.0f} → {variance_abs:+,.0f} ({variance_pct:+.1f}%)")
-            
-            data_text = "\n".join(data_summary)
-            print(f"DEBUG: Data summary prepared:\n{data_text}")
-            
-            prompt = f"""
-You're a senior financial analyst writing variance commentary for executive leadership. 
-Analyze this {scenario_type} variance data and provide clear, actionable insights.
+    def load_data(self, file):
+        df = pd.read_excel(file)
+        df.columns = df.columns.str.strip()
+        df['Revenue'] = df['Units Sold'] * df['Price per Unit'] * df.get('FX Rate', 1)
+        df['COGS Amount'] = df['Revenue'] * df['COGS %']
+        df['Gross Profit'] = df['Revenue'] - df['COGS Amount']
+        df['Gross Margin %'] = df['Gross Profit'] / df['Revenue'] * 100
+        df['EBITDA'] = df['Gross Profit'] - df['Operating Expenses'] + df.get('Depreciation', 0)
+        df['Operating Profit'] = df['EBITDA'] - df.get('Depreciation', 0)
+        df['Tax'] = df['Operating Profit'] * df.get('Tax Rate', 0)
+        df['Net Income'] = df['Operating Profit'] - df['Tax']
+        df['Cash Flow'] = df['Net Income'] + df.get('Depreciation', 0)
+        df['Operating Margin %'] = df['Operating Profit'] / df['Revenue'] * 100
+        df['Net Margin %'] = df['Net Income'] / df['Revenue'] * 100
+        self.df = df
+        return True, "Loaded"
 
-VARIANCE DATA:
-{data_text}
-
-REQUIREMENTS:
-1. Start with an executive summary (2-3 sentences)
-2. Highlight the top 3 most significant variances
-3. For each significant variance, indicate likely drivers (volume, price, timing, costs)
-4. Use professional FP&A language
-5. Keep it concise but insightful
-6. Format with clear sections
-
-TONE: Professional, analytical, action-oriented
-LENGTH: 250-400 words
-"""
-            
-            print(f"DEBUG: Sending request to OpenAI...")
-            
-            response = self.client.chat.completions.create(
-                model="gpt-4-turbo-preview",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=600,
-                temperature=0.3
-            )
-            
-            print(f"DEBUG: Received response from OpenAI")
-            commentary = response.choices[0].message.content
-            print(f"DEBUG: Commentary length: {len(commentary)} characters")
-            
-            return commentary
-            
-        except openai.RateLimitError as e:
-            error_msg = f"Rate limit exceeded. Please wait and try again. Error: {str(e)}"
-            print(f"DEBUG: Rate limit error: {error_msg}")
-            return error_msg
-        except openai.AuthenticationError as e:
-            error_msg = f"Authentication failed. Please check your API key. Error: {str(e)}"
-            print(f"DEBUG: Auth error: {error_msg}")
-            return error_msg
-        except openai.APIError as e:
-            error_msg = f"OpenAI API error: {str(e)}"
-            print(f"DEBUG: API error: {error_msg}")
-            return error_msg
-        except Exception as e:
-            error_msg = f"Unexpected error generating commentary: {str(e)}"
-            print(f"DEBUG: Unexpected error: {error_msg}")
-            return error_msg
-
-def create_variance_chart(variance_data, chart_type="bar"):
-    """Create variance visualization"""
-    if variance_data.empty:
-        return None
-    
-    top_10 = variance_data.head(10)
-    
-    if chart_type == "bar":
-        fig = px.bar(
-            top_10,
-            x=top_10.columns[0],
-            y='Variance_Absolute',
-            color='Variance_Absolute',
-            color_continuous_scale=['red', 'white', 'green'],
-            title="Top 10 Variance Drivers",
-            labels={'Variance_Absolute': 'Variance ($)'}
-        )
-        fig.update_layout(
-            height=500,
-            showlegend=False,
-            xaxis_tickangle=-45
-        )
-        return fig
-    
-    elif chart_type == "waterfall":
-        # Create waterfall chart
-        fig = go.Figure()
-        
-        x_categories = top_10.iloc[:, 0].tolist()
-        y_values = top_10['Variance_Absolute'].tolist()
-        
-        colors = ['green' if x > 0 else 'red' for x in y_values]
-        
-        fig.add_trace(go.Waterfall(
-            name="Variance",
-            orientation="v",
-            measure=["relative"] * len(y_values),
-            x=x_categories,
-            y=y_values,
-            connector={"line": {"color": "rgb(63, 63, 63)"}},
-            increasing={"marker": {"color": "green"}},
-            decreasing={"marker": {"color": "red"}},
-        ))
-        
-        fig.update_layout(
-            title="Variance Waterfall Analysis",
-            height=500,
-            xaxis_tickangle=-45
-        )
-        return fig
-    
-    return None
-
-def export_to_excel(variance_data, commentary, filename="variance_analysis.xlsx"):
-    """Export analysis to Excel"""
-    output = io.BytesIO()
-    
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        # Write variance data
-        variance_data.to_excel(writer, sheet_name='Variance Analysis', index=False)
-        
-        # Write commentary
-        commentary_df = pd.DataFrame({'Commentary': [commentary]})
-        commentary_df.to_excel(writer, sheet_name='Commentary', index=False)
-        
-        # Get workbook and worksheet objects
-        workbook = writer.book
-        worksheet = writer.sheets['Variance Analysis']
-        
-        # Format headers
-        header_format = workbook.add_format({
-            'bold': True,
-            'text_wrap': True,
-            'valign': 'top',
-            'fg_color': '#D7E4BC',
-            'border': 1
-        })
-        
-        # Apply header format
-        for col_num, value in enumerate(variance_data.columns.values):
-            worksheet.write(0, col_num, value, header_format)
-    
-    output.seek(0)
-    return output
-
-def display_analysis_results():
-    """Display analysis results - separated into its own function"""
-    analyzer = st.session_state.analyzer
-    
-    if analyzer is None or analyzer.variance_summary is None:
-        return
-    
-    # Get column selections from session state
-    budget_col = st.session_state.selected_columns['budget']
-    actual_col = st.session_state.selected_columns['actual']
-    groupby_cols = st.session_state.selected_columns['groupby']
-    
-    # Show variance summary
-    st.subheader("📈 Variance Summary")
-    st.dataframe(analyzer.variance_summary, use_container_width=True)
-    
-    # Key metrics
-    st.subheader("🎯 Key Metrics")
-    col1, col2, col3, col4 = st.columns(4)
-    
-    total_budget = analyzer.variance_summary[budget_col].sum()
-    total_actual = analyzer.variance_summary[actual_col].sum()
-    total_variance = total_actual - total_budget
-    variance_pct = (total_variance / total_budget) * 100
-    
-    with col1:
-        st.metric("Total Budget", f"${total_budget:,.0f}")
-    
-    with col2:
-        st.metric("Total Actual", f"${total_actual:,.0f}")
-    
-    with col3:
-        st.metric("Total Variance", f"${total_variance:,.0f}", f"{variance_pct:.1f}%")
-    
-    with col4:
-        favorable_count = len(analyzer.variance_summary[analyzer.variance_summary['Variance_Absolute'] > 0])
-        st.metric("Favorable Items", str(favorable_count))
-    
-    # Visualizations
-    st.subheader("📊 Variance Analysis Charts")
-    
-    tab1, tab2 = st.tabs(["Bar Chart", "Top Drivers"])
-    
-    with tab1:
-        chart = create_variance_chart(analyzer.variance_summary, "bar")
-        if chart:
-            st.plotly_chart(chart, use_container_width=True)
-    
-    with tab2:
-        top_drivers = analyzer.get_top_drivers(10)
-        if not top_drivers.empty:
-            st.dataframe(top_drivers, use_container_width=True)
-
-def handle_ai_commentary():
-    """Handle AI commentary generation - separated into its own function"""
-    api_key = st.session_state.openai_api_key
-    scenario_type = st.session_state.get('scenario_type', 'YTD vs Budget')
-    
-    st.subheader("🧠 AI-Generated Commentary")
-    
-    if not api_key:
-        st.info("🔑 Please enter your OpenAI API key in the sidebar to generate AI commentary")
-        return
-    elif not api_key.startswith('sk-'):
-        st.error("⚠️ Invalid API key format. OpenAI API keys should start with 'sk-'")
-        return
-    
-    col1, col2 = st.columns([1, 3])
-    
-    with col1:
-        # Generate commentary button
-        if st.button("🤖 Generate AI Commentary", type="primary", key="generate_commentary"):
-            with st.spinner("🔄 Generating AI commentary..."):
-                try:
-                    st.info("📊 Analyzing variance data...")
-                    ai_generator = AICommentaryGenerator(api_key)
-                    
-                    st.info("🧠 Generating commentary with AI...")
-                    commentary = ai_generator.generate_commentary(
-                        st.session_state.analyzer.variance_summary, 
-                        scenario_type,
-                        budget_col=st.session_state.selected_columns['budget'],
-                        actual_col=st.session_state.selected_columns['actual']
-                    )
-                    
-                    if commentary.startswith("Error") or commentary.startswith("Rate limit") or commentary.startswith("Authentication"):
-                        st.error(f"❌ {commentary}")
-                        st.info("💡 **Troubleshooting tips:**\n- Check your API key is correct\n- Ensure you have OpenAI credits\n- Try again in a few moments")
-                    else:
-                        st.session_state.commentary = commentary
-                        st.success("✅ Commentary generated successfully!")
-                        st.rerun()  # Refresh to show the commentary
-                        
-                except Exception as e:
-                    st.error(f"❌ Failed to generate commentary: {str(e)}")
-                    st.info("💡 **Debug info:**\n- Check your internet connection\n- Verify API key is active\n- Try refreshing the page")
-        
-        # Test API connection button
-        st.markdown("---")
-        if st.button("🔍 Test API Connection", type="secondary", key="test_connection"):
-            with st.spinner("Testing API connection..."):
-                try:
-                    ai_generator = AICommentaryGenerator(api_key)
-                    success, message = ai_generator.test_connection()
-                    if success:
-                        st.success(f"✅ {message}")
-                    else:
-                        st.error(f"❌ API connection failed: {message}")
-                except Exception as e:
-                    st.error(f"❌ API connection failed: {str(e)}")
-    
-    with col2:
-        if st.session_state.commentary:
-            st.info(f"📝 Commentary ready! ({len(st.session_state.commentary)} characters)")
+    def pivot_comparison(self, measure, cmp, left, right, yA, yB, gb):
+        df = self.df.copy()
+        if cmp.startswith('Year'):
+            df = df[df['Scenario'] == 'Actual']
+            wide = df.pivot_table(
+                index=gb or [],
+                columns='Year',
+                values=measure,
+                aggfunc='sum'
+            ).reset_index()
+            for y in [yA, yB]:
+                if y not in wide.columns:
+                    wide[y] = 0
+            a, b = yA, yB
         else:
-            st.info("💭 Click the button to generate AI commentary")
-    
-    # Display commentary if available
-    if st.session_state.commentary and not st.session_state.commentary.startswith("Error"):
-        st.markdown("### 📝 Generated Commentary")
-        st.markdown(f"""
-        <div class="commentary-box">
-            {st.session_state.commentary.replace(chr(10), '<br>')}
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Allow editing
-        st.markdown("### ✏️ Edit Commentary")
-        edited_commentary = st.text_area(
-            "Edit the generated commentary:",
-            value=st.session_state.commentary,
-            height=200,
-            key="commentary_edit",
-            help="You can edit the AI-generated commentary before exporting"
+            df = df[df['Scenario'].isin([left, right])]
+            wide = df.pivot_table(
+                index=gb or [],
+                columns='Scenario',
+                values=measure,
+                aggfunc='sum'
+            ).reset_index()
+            for sc in [left, right]:
+                if sc not in wide.columns:
+                    wide[sc] = 0
+            a, b = left, right
+        wide.columns.name = None
+        wide[a] = wide[a].fillna(0)
+        wide[b] = wide[b].fillna(0)
+        wide['Variance_Absolute'] = wide[b] - wide[a]
+        wide['Variance_Percent'] = np.where(
+            wide[a] != 0,
+            wide['Variance_Absolute'] / wide[a] * 100,
+            np.nan
         )
-        
-        if edited_commentary != st.session_state.commentary:
-            st.session_state.commentary = edited_commentary
-            st.success("✅ Commentary updated!")
+        tot = wide[a].sum() or 1
+        wide['Impact_Percent'] = wide['Variance_Absolute'] / tot * 100
+        self.variance_summary = wide.sort_values(
+            'Variance_Absolute', key=lambda s: s.abs(), ascending=False
+        )
+        return a, b
 
-# Main App
-def main():
-    # Header
-    st.markdown("""
-    <div class="main-header">
-        <h1>🧠 Variance Analysis AI Copilot</h1>
-        <p>Transform your variance analysis with AI-powered insights</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Sidebar configuration
-    st.sidebar.header("🔧 Configuration")
-    
-    # API Key input
-    api_key = st.sidebar.text_input(
-        "OpenAI API Key",
-        type="password",
-        value=st.session_state.openai_api_key,
-        help="Enter your OpenAI API key for AI commentary generation"
-    )
-    st.session_state.openai_api_key = api_key
-    
-    # Show API key status
-    if api_key:
-        if api_key.startswith('sk-'):
-            st.sidebar.success("✅ API Key format looks valid")
-        else:
-            st.sidebar.error("❌ Invalid API key format")
+# --- Load & preview ---
+if uploaded:
+    if st.session_state.analyzer is None:
+        st.session_state.analyzer = VarianceAnalyzer()
+    ok, msg = st.session_state.analyzer.load_data(uploaded)
+    if not ok:
+        st.error(msg)
     else:
-        st.sidebar.info("🔑 Enter your OpenAI API key to enable AI commentary")
-    
-    # Analysis type
-    scenario_type = st.sidebar.selectbox(
-        "Analysis Scenario",
-        ["YTD vs Budget", "Month vs Forecast", "Quarter vs Plan", "Actual vs Previous Year"]
-    )
-    st.session_state.scenario_type = scenario_type
-    
-    # File upload
-    st.sidebar.subheader("📁 Data Upload")
-    uploaded_file = st.sidebar.file_uploader(
-        "Upload Excel File",
-        type=['xlsx', 'xls'],
-        help="Upload your variance analysis data"
-    )
-    
-    if uploaded_file is not None:
-        # Initialize analyzer if not exists or if new file
-        if st.session_state.analyzer is None:
-            st.session_state.analyzer = VarianceAnalyzer()
-        
-        # Load data
-        success, message = st.session_state.analyzer.load_data(uploaded_file)
-        
-        if success:
-            st.sidebar.success(message)
-            
-            # Show data preview
-            st.subheader("📊 Data Preview")
-            st.dataframe(st.session_state.analyzer.df.head(), use_container_width=True)
-            
-            # Column selection
-            st.subheader("⚙️ Analysis Configuration")
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                budget_col = st.selectbox("Budget Column", st.session_state.analyzer.df.columns, key="budget_col_select")
-                st.session_state.selected_columns['budget'] = budget_col
-            
-            with col2:
-                actual_col = st.selectbox("Actual Column", st.session_state.analyzer.df.columns, key="actual_col_select")
-                st.session_state.selected_columns['actual'] = actual_col
-            
-            with col3:
-                groupby_cols = st.multiselect(
-                    "Group By Columns",
-                    [col for col in st.session_state.analyzer.df.columns if col not in [budget_col, actual_col]],
-                    key="groupby_cols_select"
-                )
-                st.session_state.selected_columns['groupby'] = groupby_cols
-            
-            # Calculate variances
-            if st.button("🔍 Analyze Variances", type="primary", key="analyze_variances"):
-                with st.spinner("Calculating variances..."):
-                    success, message = st.session_state.analyzer.calculate_variances(budget_col, actual_col, groupby_cols)
-                    
-                    if success:
-                        st.success(message)
-                        st.session_state.analysis_complete = True
-                        st.rerun()  # Refresh to show results
-                    else:
-                        st.error(message)
-                        st.session_state.analysis_complete = False
-            
-            # Display results if analysis is complete
-            if st.session_state.analysis_complete and st.session_state.analyzer.variance_summary is not None:
-                display_analysis_results()
-                handle_ai_commentary()
-                
-                # Export functionality
-                st.subheader("📤 Export Analysis")
-                
-                if st.button("📊 Export to Excel", type="secondary", key="export_excel"):
-                    excel_buffer = export_to_excel(
-                        st.session_state.analyzer.variance_summary,
-                        st.session_state.commentary,
-                        f"variance_analysis_{scenario_type.lower().replace(' ', '_')}.xlsx"
-                    )
-                    
-                    st.download_button(
-                        label="💾 Download Excel Report",
-                        data=excel_buffer,
-                        file_name=f"variance_analysis_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-        else:
-            st.sidebar.error(message)
-    
-    # Sample data template
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("📋 Sample Data Template")
-    
-    if st.sidebar.button("📥 Download Sample Template"):
-        sample_data = pd.DataFrame({
-            'Product': ['Product A', 'Product B', 'Product C', 'Product D'],
-            'Region': ['North', 'South', 'East', 'West'],
-            'Budget': [100000, 150000, 120000, 80000],
-            'Actual': [110000, 140000, 125000, 85000],
-            'Units_Budget': [500, 750, 600, 400],
-            'Units_Actual': [520, 700, 625, 425]
-        })
-        
-        buffer = io.BytesIO()
-        sample_data.to_excel(buffer, index=False)
-        buffer.seek(0)
-        
-        st.sidebar.download_button(
-            label="💾 Download Sample Data",
-            data=buffer,
-            file_name="variance_analysis_sample.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        df = st.session_state.analyzer.df
+        st.subheader("📊 Data Preview")
+        st.dataframe(df.head().reset_index(drop=True), use_container_width=True)
 
-if __name__ == "__main__":
-    main()
+# --- Analysis Configuration ---
+if 'df' in locals():
+    st.markdown("## ⚙️ Analysis Configuration")
+    measures = [
+        c for c in df.columns
+        if pd.api.types.is_numeric_dtype(df[c]) and c not in ['Year','Month']
+    ]
+    measure = st.selectbox("Measure", measures)
+    cmp = st.selectbox(
+        "Comparison", [
+            'Budget vs Actual', 'Forecast vs Actual',
+            'Budget vs Forecast', 'Year-over-Year (Actual)'
+        ]
+    )
+    if cmp.startswith('Year'):
+        left = right = None
+        years = sorted(df['Year'].unique())
+        yA = st.selectbox('Year A', years)
+        yB = st.selectbox('Year B', [y for y in years if y != yA])
+    else:
+        opts = list(df['Scenario'].unique())
+        left = st.selectbox('Left Scenario', opts)
+        right = st.selectbox(
+            'Right Scenario', [o for o in opts if o != left]
+        )
+        yA = yB = None
+    dims = [
+        c for c in df.columns
+        if c not in measures + ['Scenario','Year','Month']
+    ]
+    gb = st.multiselect('Group by', dims)
+    # Mandatory group-by check
+    if not gb:
+        st.warning("👉 Please select at least one 'Group by' dimension (e.g. Region or Product) before analyzing.")
+        st.stop()
+    if st.button('🔍 Analyze'):
+        a, b = st.session_state.analyzer.pivot_comparison(
+            measure, cmp, left, right, yA, yB, gb
+        )
+        st.session_state.var_df = st.session_state.analyzer.variance_summary
+        st.session_state.a_col = a
+        st.session_state.b_col = b
+
+# --- Results ---
+if st.session_state.var_df is not None:
+    vs = st.session_state.var_df
+    a = st.session_state.a_col
+    b = st.session_state.b_col
+    xcol = gb[0]
+    st.subheader("📈 Variance Summary")
+    st.dataframe(vs.reset_index(drop=True), use_container_width=True)
+
+    st.subheader("🎯 Key Metrics")
+    tA = vs[a].sum()
+    tB = vs[b].sum()
+    d = tB - tA
+    p = d / tA * 100 if tA else 0
+    c1, c2, c3, c4 = st.columns(4)
+    # Format metrics without dollar prefix for non-currency measures
+    if measure.lower() == 'units sold':
+        c1.metric(a, f"{tA:,.0f}")
+        c2.metric(b, f"{tB:,.0f}")
+        c3.metric('Diff', f"{d:,.0f}", f"{p:.1f}%")
+    else:
+        c1.metric(a, f"${tA:,.0f}")
+        c2.metric(b, f"${tB:,.0f}")
+        c3.metric('Diff', f"${d:,.0f}", f"{p:.1f}%")
+    # Fav items always number
+    c4.metric('Fav Items', str((vs['Variance_Absolute'] > 0).sum()))
+
+    st.subheader("📊 Charts")
+    tab1, tab2 = st.tabs(['Top Drivers','Waterfall'])
+    with tab1:
+        fig = plot_bar(vs, xcol, measure)
+        st.plotly_chart(fig, use_container_width=True)
+    with tab2:
+        fig = plot_waterfall(vs, a, b, xcol)
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("📝 AI Commentary")
+    key = st.session_state.api_key
+    if key and key.startswith('sk-'):
+        if st.button('🤖 Comment'):
+            cli = openai.OpenAI(api_key=key)
+            lines = [
+                f"- {r[xcol]}: {r['Variance_Absolute']:+,.0f} ({r['Variance_Percent']:+.1f}%)"
+                for _, r in vs.head(5).iterrows()
+            ]
+            pr = f"FP&A commentary for {measure} {cmp}:\n" + "\n".join(lines)
+            res = cli.chat.completions.create(
+                model='gpt-4-turbo-preview',
+                messages=[{'role':'user','content':pr}],
+                max_tokens=400, temperature=0.3
+            )
+            st.session_state.commentary = res.choices[0].message.content
+        if st.session_state.commentary:
+            st.markdown(
+                f"<div class='commentary-box'>{st.session_state.commentary.replace(chr(10),'<br>')}</div>",
+                unsafe_allow_html=True
+            )
+    else:
+        st.info('Enter a valid OpenAI API key in sidebar')
+
+        # Full report download
+    def gen_report(raw, dr, comp, drv, filt, gb_cols):
+        buf = BytesIO()
+        with pd.ExcelWriter(buf) as writer:
+            dr.to_excel(writer, 'Raw_Derived', index=False)
+            comp.to_excel(writer, 'Comparison', index=False)
+            drv.head(10).to_excel(writer, 'Top_Drivers', index=False)
+            # Heatmap: pivot variance percent if possible
+            try:
+                if len(gb_cols) >= 2:
+                    row_dim, col_dim = gb_cols[0], gb_cols[1]
+                elif 'Region' in comp.columns:
+                    row_dim, col_dim = gb_cols[0] if gb_cols else None, 'Region'
+                else:
+                    row_dim, col_dim = None, None
+                if row_dim and col_dim and row_dim in comp.columns and col_dim in comp.columns:
+                    hm = comp.pivot_table(
+                        index=row_dim,
+                        columns=col_dim,
+                        values='Variance_Percent'
+                    ).reset_index()
+                    hm.to_excel(writer, 'Heatmap', index=False)
+            except Exception:
+                # Skip heatmap if any error
+                pass
+            filt.to_excel(writer, 'Filtered_Data', index=False)
+        buf.seek(0)
+        return buf
+
+    raw = df.copy()
+    dr = raw.copy()
+    comp = vs.copy()
+    drv = vs.copy()
+    filt = raw.copy()
+    report_io = gen_report(raw, dr, comp, drv, filt, gb)
+    st.download_button(
+        '💾 Download Excel Report',
+        report_io,
+        f"var_report_{datetime.now():%Y%m%d}.xlsx",
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
