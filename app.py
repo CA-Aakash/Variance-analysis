@@ -91,7 +91,6 @@ def plot_bar(df, x_col, measure):
     )
     return fig
 
-
 def plot_waterfall(df, a_col, b_col, x_col):
     data = [{'Category': a_col, 'Value': df[a_col].sum(), 'Type': 'absolute'}]
     for _, row in df.head(5).iterrows():
@@ -113,6 +112,76 @@ def plot_waterfall(df, a_col, b_col, x_col):
         title='Waterfall: Baseline to Comparison',
         template='plotly_white'
     )
+    return fig
+
+# New helpers
+
+def plot_heatmap(df, x_dim, y_dim):
+    pivot = df.pivot_table(
+        index=y_dim,
+        columns=x_dim,
+        values='Variance_Percent',
+        aggfunc='mean'
+    )
+    fig = go.Figure(data=go.Heatmap(
+        z=pivot.values,
+        x=pivot.columns.astype(str),
+        y=pivot.index.astype(str),
+        colorscale='RdBu',
+        reversescale=True,
+        colorbar_title='% Var'
+    ))
+    fig.update_layout(title='Heatmap of Variance %', template='plotly_white')
+    return fig
+
+def plot_tornado(df, x_col):
+    top = df.head(10).copy()
+    top = top.sort_values('Variance_Absolute')
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=-top['Variance_Absolute'],
+        y=top[x_col].astype(str),
+        orientation='h',
+        name='Unfavorable',
+        marker_color='red'
+    ))
+    fig.add_trace(go.Bar(
+        x=top['Variance_Absolute'],
+        y=top[x_col].astype(str),
+        orientation='h',
+        name='Favorable',
+        marker_color='green'
+    ))
+    fig.update_layout(title='Tornado Chart', barmode='overlay', template='plotly_white')
+    return fig
+
+def plot_trend(df, measure):
+    df['Date'] = pd.to_datetime(df['Year'].astype(str) + '-' + df['Month'], format='%Y-%b')
+    trend = df.groupby('Date')[measure].sum().reset_index()
+    fig = px.line(trend, x='Date', y=measure, title=f'{measure} Trend', template='plotly_white')
+    return fig
+
+def plot_scatter(df, a_col, b_col):
+    # Scatter of baseline vs comparison values
+    fig = px.scatter(
+        df,
+        x=a_col,
+        y=b_col,
+        color='Variance_Absolute',
+        title=f'{a_col} vs {b_col} Scatter',
+        labels={a_col: a_col, b_col: b_col, 'Variance_Absolute': 'Variance Absolute'},
+        template='plotly_white'
+    )
+    return fig
+
+def plot_bullet(actual, budget):
+    fig = go.Figure(go.Indicator(
+        mode="number+gauge", value=actual,
+        gauge={'shape': "bullet", 'axis': {'range': [0, max(budget, actual) * 1.2]}},
+        delta={'reference': budget},
+        domain={'x': [0, 1], 'y': [0, 1]}
+    ))
+    fig.update_layout(title='Bullet Chart: Actual vs Budget')
     return fig
 
 # --- Sidebar configuration ---
@@ -299,12 +368,42 @@ if st.session_state.var_df is not None:
     c4.metric('Fav Items', str((vs['Variance_Absolute'] > 0).sum()))
 
     st.subheader("📊 Charts")
-    tab1, tab2 = st.tabs(['Top Drivers','Waterfall'])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(['Top Drivers','Waterfall','Heatmap','Tornado','Trend','Scatter','Bullet'])
     with tab1:
         fig = plot_bar(vs, xcol, measure)
         st.plotly_chart(fig, use_container_width=True)
     with tab2:
         fig = plot_waterfall(vs, a, b, xcol)
+        st.plotly_chart(fig, use_container_width=True)
+    with tab3:
+        st.subheader("🗺️ Variance % Heatmap")
+        # pick your two dims (we’ll just use the first two group‑bys here)
+        x_dim = gb[0]
+        y_dim = gb[1] if len(gb) > 1 else gb[0]
+        fig = plot_heatmap(vs, x_dim, y_dim)
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tab4:
+        st.subheader("🌪️ Tornado Chart")
+        fig = plot_tornado(vs, xcol)
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tab5:
+        st.subheader("📈 Trend by Month")
+        fig = plot_trend(st.session_state.analyzer.df, measure)
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tab6:
+        st.subheader("🔍 Variance vs Measure Scatter")
+        fig = plot_scatter(vs, measure)
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tab7:
+        st.subheader("🎯 Bullet / Gauge")
+        # show actual vs budget (or left vs right)
+        actual = vs[b].sum()
+        budget = vs[a].sum()
+        fig = plot_bullet(actual, budget)
         st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("📝 AI Commentary")
