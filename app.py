@@ -375,10 +375,23 @@ measures = [
 multi_mode = st.checkbox("Compare multiple measures at once?", value=False, key="multi_mode")
 
 if multi_mode:
+    core_measures  = ['Revenue', 'EBITDA', 'Net Income']
+    available_core = [m for m in core_measures if m in measures]
+
+    advanced = st.checkbox("🔧 Advanced: pick from ALL numeric measures", value=False, key="adv_measures")
+
+    # pool = list to show; defaults depend on pool chosen
+    pool = measures if advanced else available_core
+    default_sel = (
+        st.session_state.get("measures_sel", available_core)
+        if not advanced
+        else st.session_state.get("measures_sel", pool[:5])   # first 5 as a sane default
+    )
+
     measures_sel = st.multiselect(
         "Measures",
-        measures,
-        default=[m for m in ['Revenue','EBITDA','Net Income'] if m in measures],
+        pool,
+        default=default_sel,
         key="measures_sel"
     )
 else:
@@ -388,6 +401,7 @@ else:
         index=measures.index('Revenue') if 'Revenue' in measures else 0,
         key="measure_single"
     )
+
 
 # <-- NEW: show Comparison selector for BOTH modes
 cmp = st.selectbox(
