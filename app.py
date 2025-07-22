@@ -461,26 +461,29 @@ def render_measure_block(vs, a, b, xcol, measure, gb):
     # --- Key Metrics ---
     tA = vs[a].sum()
     tB = vs[b].sum()
-    d = tB - tA
-    p = d / tA * 100 if tA else 0
+    d  = tB - tA
+    p  = d / tA * 100 if tA else 0
+
     c1, c2, c3, c4 = st.columns(4)
 
-    # no currency symbol for unit-type measures
-    if measure.lower() == 'units sold':
-        fmt = lambda v: f"{v:,.0f}"
-    else:
-        fmt = lambda v: f"${v:,.0f}"
+    label_a = str(a)
+    label_b = str(b)
+    diff_label = f"Diff ({label_b} - {label_a})"
 
-    c1.metric(a, fmt(tA))
-    c2.metric(b, fmt(tB))
-    c3.metric('Diff', fmt(d), f"{p:.1f}%")
+    # no currency symbol for unit-type measures
+    fmt = (lambda v: f"{v:,.0f}") if measure.lower() == 'units sold' else (lambda v: f"${v:,.0f}")
+
+    c1.metric(label_a, fmt(tA))
+    c2.metric(label_b, fmt(tB))
+    c3.metric(diff_label, fmt(d), f"{p:.1f}%")
     c4.metric('Fav Items', str((vs['Variance_Absolute'] > 0).sum()))
 
-    # --- Charts ---
+
+        # --- Charts ---
     st.subheader("📊 Charts")
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
-        ['Top Drivers','Waterfall','Heatmap','Tornado','Trend','Scatter','Bullet']
-    )
+            ['Top Drivers','Waterfall','Heatmap','Tornado','Trend','Scatter','Bullet']
+        )
 
     with tab1:
         fig = plot_bar(vs, xcol, measure)
