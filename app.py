@@ -267,17 +267,25 @@ if st.sidebar.button("📥 Download Full Template"):
     )
 
 uploaded = st.sidebar.file_uploader(
-    "📁 Upload Excel File", type=["xlsx", "xls"], help="Upload your variance data"
+    "📁 Upload Excel File", type=["xlsx", "xls"], help="Upload your variance data", key="uploaded_file"
 )
 
 
 # --- State init ---
-if "analyzer" not in st.session_state:
+if 'analyzer' not in st.session_state:
     st.session_state.analyzer = None
-if "var_df" not in st.session_state:
+if 'var_df' not in st.session_state:
     st.session_state.var_df = None
-if "commentary" not in st.session_state:
+if 'commentary' not in st.session_state:
     st.session_state.commentary = ""
+# Initialize raw_df for uploaded data
+if 'raw_df' not in st.session_state:
+    st.session_state.raw_df = None
+# ⬇ pre-initialize measure & comparison so .measure/.cmp never missing
+if 'measure' not in st.session_state:
+    st.session_state.measure = None
+if 'cmp' not in st.session_state:
+    st.session_state.cmp = None
 
 
 # --- VarianceAnalyzer class ---
@@ -398,75 +406,54 @@ if uploaded:
     if not ok:
         st.error(msg)
     else:
-        df = st.session_state.analyzer.df
-        st.session_state.df = df  # <— keep a copy
-        st.session_state.numeric_cols = [
-            c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])
-        ]
-        st.session_state.measures = [
-            c for c in st.session_state.numeric_cols if c not in ["Year", "Month"]
-        ]
-        st.session_state.dims = [
-            c
-            for c in df.columns
-            if c not in (st.session_state.measures + ["Scenario", "Year", "Month"])
-        ]
+        raw = st.session_state.analyzer.df
+        st.session_state.raw_df = raw
         st.subheader("📊 Data Preview")
-        st.dataframe(df.head().reset_index(drop=True), use_container_width=True)
+        st.dataframe(raw.head().reset_index(drop=True), use_container_width=True)
+
+
+
 
 
 # --- after the upload/preview block ---
 
 
 def require_data():
-    df = st.session_state.get("df")
-    if df is None:
-        st.warning("Upload and load a file before configuring the analysis.")
-        st.stop()
-    numeric_cols = st.session_state.get("numeric_cols", [])
-    measures = st.session_state.get("measures", [])
-    dims = st.session_state.get("dims", [])
-    return df, numeric_cols, measures, dims
+    df = st.session_state.get("raw_df")
+    if df is None and st.session_state.analyzer is not None:
+        df = st.session_state.analyzer.df
+        st.session_state.raw_df = df
 
+    if df is None:
+        st.warning("📁 Upload and load a file before configuring the analysis.")
+        st.stop()
+
+    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    measures     = [c for c in numeric_cols if c not in ['Year','Month']]
+    dims         = [c for c in df.columns if c not in (measures + ['Scenario','Year','Month'])]
+    return df, numeric_cols, measures, dims
 
 # Usage
 df, numeric_cols, measures, dims = require_data()
 
 # --- Analysis Configuration ---
-if "df" in locals():
-    st.markdown("## ⚙️ Analysis Configuration")
-# existing 'measures' list still works
+st.markdown("## ⚙️ Analysis Configuration")
 
-
-measures = [
-    c
-    for c in df.columns
-    if pd.api.types.is_numeric_dtype(df[c]) and c not in ["Year", "Month"]
-]
-
-multi_mode = st.checkbox(
-    "Compare multiple measures at once?", value=False, key="multi_mode"
-)
+# --- Measure selector(s) ---
+multi_mode = st.checkbox("Compare multiple measures at once?", key="multi_mode")
 
 if multi_mode:
-    core_measures = ["Revenue", "COGS Amount", "EBITDA"]
-    available_core = [m for m in core_measures if m in measures]
-
-    advanced = st.checkbox(
-        "🔧 Advanced: pick from ALL numeric measures", value=False, key="adv_measures"
-    )
-
-    # pool = list to show; defaults depend on pool chosen
-    pool = measures if advanced else available_core
-    default_sel = (
-        st.session_state.get("measures_sel", available_core)
-        if not advanced
-        else st.session_state.get("measures_sel", pool[:5])  # first 5 as a sane default
-    )
-
+    core        = [m for m in ["Revenue", "COGS Amount", "EBITDA"] if m in measures]
+    adv         = st.checkbox("🔧 Advanced: pick from ALL numeric measures", key="adv_measures")
+    pool        = measures if adv else core
     measures_sel = st.multiselect(
-        "Measures", pool, default=default_sel, key="measures_sel"
+        "Measures",
+        pool,
+        default=st.session_state.get("measures_sel", pool),
+        key="measures_sel"
     )
+    
+
 else:
     measure = st.selectbox(
         "Measure",
@@ -474,9 +461,11 @@ else:
         index=measures.index("Revenue") if "Revenue" in measures else 0,
         key="measure_single",
     )
+    # persist your single measure choice
+    st.session_state.measure = measure
 
 
-# <-- NEW: show Comparison selector for BOTH modes
+# --- Comparison selector (shared) ---
 cmp = st.selectbox(
     "Comparison",
     [
@@ -487,60 +476,75 @@ cmp = st.selectbox(
     ],
     key="cmp_type",
 )
-
 st.session_state.cmp = cmp
 
+
+# Scenario / year selectors
 if cmp.startswith("Year"):
     years = sorted(df["Year"].unique())
     yA = st.selectbox("Year A", years, key="year_a")
     yB = st.selectbox("Year B", [y for y in years if y != yA], key="year_b")
     left = right = None
 else:
-    opts = list(df["Scenario"].unique())
-    left = st.selectbox("Left Scenario", opts, key="left_scen")
-    right = st.selectbox(
-        "Right Scenario", [o for o in opts if o != left], key="right_scen"
-    )
+    opts  = list(df["Scenario"].unique())
+    left  = st.selectbox("Left Scenario",  opts, key="left_scen")
+    right = st.selectbox("Right Scenario", [o for o in opts if o != left], key="right_scen")
     yA = yB = None
 
+# Group-by (mandatory)
 gb = st.multiselect("Group by", dims, key="group_by_dims")
-
-# Mandatory group-by check (do this once, before the button)
 if not gb:
-    st.warning(
-        "👉 Please select at least one 'Group by' dimension (e.g. Region or Product) before analyzing."
-    )
+    st.warning("👉 Please select at least one 'Group by' dimension before analyzing.")
     st.stop()
 
-# Analyze
+# ────────────────────────────────────────
+# 🔎 Filters (optional) in a collapsed expander
+with st.expander("🔎 Filters (optional)", expanded=False):
+    sel_region   = st.multiselect("Region", sorted(df["Region"].unique()),   key="filter_region")
+    sel_product  = st.multiselect("Product", sorted(df["Product"].unique()),  key="filter_product")
+    sel_segment  = st.multiselect("Customer Segment", sorted(df["Customer Segment"].unique()), key="filter_segment")
+    sel_channel  = st.multiselect("Channel", sorted(df["Channel"].unique()),   key="filter_channel")
+
+# ────────────────────────────────────────
+# Analyze (only when you click)
 if st.button("🔍 Analyze"):
-    # store for later use in the results section
-    st.session_state.gb = gb
+    # 1) apply filters to the untouched raw_df
+    filtered = st.session_state.raw_df.copy()
+    if sel_region:
+        filtered = filtered[filtered["Region"].isin(sel_region)]
+    if sel_product:
+        filtered = filtered[filtered["Product"].isin(sel_product)]
+    if sel_segment:
+        filtered = filtered[filtered["Customer Segment"].isin(sel_segment)]
+    if sel_channel:
+        filtered = filtered[filtered["Channel"].isin(sel_channel)]
+
+    # 2) update the analyzer's df to the filtered set
+    st.session_state.analyzer.df = filtered.copy()
+
+    # 3) store gb & cmp for later blocks
+    st.session_state.gb  = gb
     st.session_state.cmp = cmp
-    if not multi_mode:
-        st.session_state.measure = measure
 
     if multi_mode:
-        # Build a dict of variance tables per measure
+        # your existing multi‐measure logic
         var_dict = {}
         for m in measures_sel:
             vs_m, a_m, b_m = get_variance_df(
                 st.session_state.analyzer.df, m, cmp, left, right, yA, yB, gb
             )
             var_dict[m] = (vs_m, a_m, b_m)
-
         st.session_state.multi_results = var_dict
-        st.session_state.single_result = None
-        st.session_state.var_df = None  # clear single result vars
+        st.session_state.var_df       = None
     else:
+        # your existing single‐measure pivot logic
         a, b = st.session_state.analyzer.pivot_comparison(
             measure, cmp, left, right, yA, yB, gb
         )
         st.session_state.var_df = st.session_state.analyzer.variance_summary
-        st.session_state.a_col = a
-        st.session_state.b_col = b
-        st.session_state.single_result = True
-        st.session_state.multi_results = None  # clear multi result dict
+        st.session_state.a_col  = a
+        st.session_state.b_col  = b
+        st.session_state.multi_results = None
 
 
 def _is_currency(m):
@@ -650,10 +654,11 @@ def render_measure_block(vs, a, b, xcol, measure, gb):
         chosen = st.selectbox(
             f"Select {xcol} to drill", options, key=f"drill_{measure}_{xcol}"
         )
-
         detail_df = get_detail_slice(
-            st.session_state.df, xcol, chosen, cmp_txt, a_label, b_label
+        st.session_state.analyzer.df,  # ← filtered dataset in use
+        xcol, chosen, cmp_txt, a_label, b_label
         )
+
         detail_df = detail_df.reset_index(drop=True)
 
         st.dataframe(
@@ -762,7 +767,7 @@ elif st.session_state.get("var_df") is not None:  # single measure
         buf.seek(0)
         return buf
 
-    raw = df.copy()
+    raw = st.session_state.analyzer.df.copy()
     dr = raw.copy()
     comp = vs.copy()
     drv = vs.copy()
