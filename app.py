@@ -681,6 +681,122 @@ def render_measure_block(vs, a, b, xcol, measure, gb):
             )
 
 
+def _safe_list_label(name, seq):
+    if not seq: return f"{name}: All"
+    return f"{name}: " + ", ".join(map(str, seq))
+
+def _trend_snippet(df_filtered, measure, cmp, a_label, b_label):
+    # Use 'Actual' for YoY; otherwise the right scenario
+    df_t = df_filtered.copy()
+    if cmp.startswith("Year"):
+        df_t = df_t[df_t["Scenario"] == "Actual"]
+    else:
+        df_t = df_t[df_t["Scenario"] == b_label]
+
+    if df_t.empty or "Month" not in df_t or "Year" not in df_t:
+        return "No trend available."
+
+    df_t = df_t.copy()
+    df_t["Date"] = pd.to_datetime(df_t["Year"].astype(str)+"-"+df_t["Month"], format="%Y-%b", errors="coerce")
+    tr = df_t.groupby("Date", dropna=True)[measure].sum().reset_index().sort_values("Date").tail(6)
+    if tr.empty: return "No trend available."
+    change = (tr[measure].iloc[-1] - tr[measure].iloc[0]) / (tr[measure].iloc[0] or 1) * 100
+    return f"Last 6 periods trend: {tr[measure].iloc[0]:,.0f} → {tr[measure].iloc[-1]:,.0f} ({change:+.1f}%)."
+
+def _top_pos_neg(vs_df, id_col, k=3):
+    if vs_df.empty: return [], []
+    top = vs_df.nlargest(k, "Variance_Absolute", keep="all")
+    bot = vs_df.nsmallest(k, "Variance_Absolute", keep="all")
+    pos = [f"{r[id_col]}: {r['Variance_Absolute']:+,.0f} ({r['Variance_Percent']:+.1f}%)" for _, r in top.iterrows()]
+    neg = [f"{r[id_col]}: {r['Variance_Absolute']:+,.0f} ({r['Variance_Percent']:+.1f}%)" for _, r in bot.iterrows()]
+    return pos, neg
+
+def _dim_highlights(df_filtered, measure, cmp, left, right, yA, yB):
+    """Compute top + bottom drivers for each single dimension, regardless of current group-by."""
+    dims_try = [c for c in ["Product","Region","Customer Segment","Channel"] if c in df_filtered.columns]
+    out = []
+    for d in dims_try:
+        vs_d, a_d, b_d = get_variance_df(df_filtered, measure, cmp, left, right, yA, yB, [d])
+        pos, neg = _top_pos_neg(vs_d, d, k=3)
+        if pos or neg:
+            out.append((d, pos, neg))
+    return out
+
+def build_commentary_prompt(
+    vs, a, b, xcol, measure, gb, df_filtered, cmp_txt, left, right, yA, yB,
+    sel_region, sel_product, sel_segment, sel_channel
+):
+    # Totals
+    tA = vs[a].sum(); tB = vs[b].sum()
+    d  = tB - tA; p = d / (tA or 1) * 100
+
+    # Top 5 in current group-by
+    current_dim_lines = [
+        f"- {r[xcol]}: {r['Variance_Absolute']:+,.0f} ({r['Variance_Percent']:+.1f}%)"
+        for _, r in vs.head(5).iterrows()
+    ]
+
+    # Trend (last 6 periods)
+    trend_txt = _trend_snippet(df_filtered, measure, cmp_txt, a, b)
+
+    # Cross-dimension highlights
+    dim_cards = _dim_highlights(df_filtered, measure, cmp_txt, left, right, yA, yB)
+
+    # Filters summary
+    filters_txt = " | ".join([
+        _safe_list_label("Region",   sel_region),
+        _safe_list_label("Product",  sel_product),
+        _safe_list_label("Segment",  sel_segment),
+        _safe_list_label("Channel",  sel_channel),
+    ])
+
+    # Labels for comparison
+    a_label = str(a); b_label = str(b)
+
+    # Build the prompt
+    prompt = f"""
+Act as a senior FP&A analyst. Write a concise executive-ready commentary (6–10 bullet points) on the variance below.
+Avoid restating raw numbers only—explain *why* and *what to do*. Be crisp and decision-oriented.
+
+Context
+- Measure: {measure}
+- Comparison: {cmp_txt}  (Base={a_label}, Compare={b_label})
+- Filters: {filters_txt}
+- Group-by in view: {xcol} {'+'.join(gb[1:]) if len(gb)>1 else ''}
+
+Totals
+- {a_label}: {tA:,.0f}
+- {b_label}: {tB:,.0f}
+- Variance: {d:+,.0f} ({p:+.1f}%)
+
+Top drivers in current view ({xcol})
+{chr(10).join(current_dim_lines)}
+
+Trend
+- {trend_txt}
+"""
+    # Add dimension highlights
+    if dim_cards:
+        prompt += "\nCross-dimension highlights\n"
+        for dim, pos, neg in dim_cards:
+            if pos:
+                prompt += f"- {dim} +: " + "; ".join(pos) + "\n"
+            if neg:
+                prompt += f"- {dim} −: " + "; ".join(neg) + "\n"
+
+    # Guidance
+    prompt += """
+Guidelines
+- Start with the biggest drivers and business reasons (mix, price/volume, channel shift, geography, operational levers).
+- Call out risks/opportunities and likely sustainability (one-offs vs structural).
+- Close with 2–3 recommended actions or watchouts.
+"""
+    return prompt.strip()
+
+
+
+
+
 # --- Results ---
 if st.session_state.get("multi_results"):
     gb = st.session_state.gb
@@ -708,24 +824,44 @@ elif st.session_state.get("var_df") is not None:  # single measure
 
     st.subheader("📝 AI Commentary")
     key = st.session_state.api_key
+    
     if key and key.startswith("sk-"):
         if st.button("🤖 Comment"):
             cli = openai.OpenAI(api_key=key)
-            lines = [
-                f"- {r[xcol]}: {r['Variance_Absolute']:+,.0f} ({r['Variance_Percent']:+.1f}%)"
-                for _, r in vs.head(5).iterrows()
-            ]
-            cmp = st.session_state.get("cmp", "")  # safe fetch
 
-            pr = f"FP&A commentary for {measure} {cmp}:\n" + "\n".join(lines)
+            # pull selectors & filters from state (safe defaults)
+            cmp_txt    = st.session_state.get("cmp", "")
+            left       = st.session_state.get("left_scen", None)
+            right      = st.session_state.get("right_scen", None)
+            yA         = st.session_state.get("year_a", None)
+            yB         = st.session_state.get("year_b", None)
+
+            sel_region  = st.session_state.get("filter_region", [])
+            sel_product = st.session_state.get("filter_product", [])
+            sel_segment = st.session_state.get("filter_segment", [])
+            sel_channel = st.session_state.get("filter_channel", [])
+
+            # ensure filtered df (what you analyzed)
+            df_filtered = st.session_state.analyzer.df.copy()
+
+            prompt = build_commentary_prompt(
+                vs, a, b, xcol, measure, gb, df_filtered, cmp_txt,
+                left, right, yA, yB,
+                sel_region, sel_product, sel_segment, sel_channel
+            )
 
             res = cli.chat.completions.create(
-                model="gpt-4-turbo-preview",
-                messages=[{"role": "user", "content": pr}],
-                max_tokens=400,
-                temperature=0.3,
+                model="gpt-4o-mini",        # or your preferred model
+                messages=[{"role":"user","content":prompt}],
+                max_tokens=500,
+                temperature=0.2
             )
             st.session_state.commentary = res.choices[0].message.content
+
+            
+            
+            
+            
         if st.session_state.commentary:
             st.markdown(
                 f"<div class='commentary-box'>{st.session_state.commentary.replace(chr(10), '<br>')}</div>",
