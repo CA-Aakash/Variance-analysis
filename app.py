@@ -227,20 +227,85 @@ def plot_scatter(df, a_col, b_col):
     return fig
 
 
-def plot_bullet(actual, budget):
-    fig = go.Figure(
-        go.Indicator(
-            mode="number+gauge",
-            value=actual,
-            gauge={
-                "shape": "bullet",
-                "axis": {"range": [0, max(budget, actual) * 1.2]},
+def _fmt_compact(n, unit="$"):
+    """Compact formatter: 130,900,000 -> $130.9M (unit='' for non-currency)."""
+    if n is None or pd.isna(n):
+        return "-"
+    absn = abs(n)
+    if absn >= 1_000_000_000:
+        s = f"{n/1_000_000_000:.1f}B"
+    elif absn >= 1_000_000:
+        s = f"{n/1_000_000:.1f}M"
+    elif absn >= 1_000:
+        s = f"{n/1_000:.1f}K"
+    else:
+        s = f"{n:.0f}"
+    return f"{unit}{s}" if unit else s
+
+def plot_bullet(actual, budget, label='Actual vs Budget', unit='$'):
+    """
+    Enhanced bullet chart:
+    - Green bar = Actual
+    - Dark marker = Budget (target)
+    - Bands: Under (<90% of budget), Near (90–100%), Above (100–110%)
+    - Delta vs budget shown on the right
+    """
+    # Guard rails
+    actual = 0 if pd.isna(actual) else float(actual)
+    budget = 0 if pd.isna(budget) else float(budget)
+
+    # Axis range and bands around the target
+    max_axis = max(actual, budget) * 1.2 if max(actual, budget) > 0 else 1.0
+    under_hi = 0.90 * budget
+    near_hi  = 1.00 * budget
+    above_hi = 1.10 * budget
+
+    fig = go.Figure(go.Indicator(
+        mode="number+gauge+delta",
+        value=actual,
+        number={"valueformat": ",", "font": {"size": 32}},
+        delta={
+            "reference": budget,
+            "relative": True,
+            "valueformat": ".1%",
+            "increasing": {"color": "#16a34a"},  # green
+            "decreasing": {"color": "#dc2626"},  # red
+        },
+        title={"text": f"Bullet Chart: {label}<br><span style='font-size:0.9em'>{_fmt_compact(actual, unit)} vs target {_fmt_compact(budget, unit)}</span>"},
+        gauge={
+            "shape": "bullet",
+            "axis": {"range": [0, max_axis]},
+            # Performance bands (light -> dark)
+            "steps": [
+                {"range": [0, min(under_hi, max_axis)], "color": "#fde68a"},   # under (amber)
+                {"range": [min(under_hi, max_axis), min(near_hi, max_axis)], "color": "#bbf7d0"},  # near (light green)
+                {"range": [min(near_hi, max_axis), min(above_hi, max_axis)], "color": "#86efac"},  # above (green)
+            ],
+            # Actual bar color
+            "bar": {"color": "#16a34a"},
+            # Target marker (budget)
+            "threshold": {
+                "line": {"color": "#111827", "width": 3},
+                "thickness": 0.9,
+                "value": min(budget, max_axis),
             },
-            delta={"reference": budget},
-            domain={"x": [0, 1], "y": [0, 1]},
-        )
+        },
+        domain={"x": [0, 0.88], "y": [0, 1]},  # leave space on the right for number+delta
+    ))
+
+    # Right-side big number with compact formatting
+    fig.add_annotation(
+        x=0.94, y=0.5, xref="paper", yref="paper",
+        text=_fmt_compact(actual, unit),
+        showarrow=False, font={"size": 40, "color": "#6b7280"},
+        align="left"
     )
-    fig.update_layout(title="Bullet Chart: Actual vs Budget")
+
+    fig.update_layout(
+        template="plotly_white",
+        margin=dict(l=40, r=40, t=60, b=20),
+        height=220,
+    )
     return fig
 
 
@@ -638,8 +703,10 @@ def render_measure_block(vs, a, b, xcol, measure, gb):
         st.subheader("🎯 Bullet / Gauge")
         actual = vs[b].sum()
         budget = vs[a].sum()
-        fig = plot_bullet(actual, budget)
+        unit = "$" if _is_currency(measure) else ""
+        fig = plot_bullet(actual, budget, label=f"{measure}: {str(b)} vs {str(a)}", unit=unit)
         st.plotly_chart(fig, use_container_width=True)
+
 
     with tab8:
         st.subheader("🔎 Drill‑through Details")
