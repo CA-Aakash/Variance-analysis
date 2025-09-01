@@ -227,84 +227,67 @@ def plot_scatter(df, a_col, b_col):
     return fig
 
 
-def _fmt_compact(n, unit="$"):
-    """Compact formatter: 130,900,000 -> $130.9M (unit='' for non-currency)."""
-    if n is None or pd.isna(n):
-        return "-"
-    absn = abs(n)
-    if absn >= 1_000_000_000:
-        s = f"{n/1_000_000_000:.1f}B"
-    elif absn >= 1_000_000:
-        s = f"{n/1_000_000:.1f}M"
-    elif absn >= 1_000:
-        s = f"{n/1_000:.1f}K"
-    else:
-        s = f"{n:.0f}"
-    return f"{unit}{s}" if unit else s
-
-def plot_bullet(actual, budget, label='Actual vs Budget', unit='$'):
-    """
-    Enhanced bullet chart:
-    - Green bar = Actual
-    - Dark marker = Budget (target)
-    - Bands: Under (<90% of budget), Near (90–100%), Above (100–110%)
-    - Delta vs budget shown on the right
-    """
-    # Guard rails
+def plot_bullet(actual, budget, label="Actual vs Budget", unit="$"):
+    """Clean CFO-friendly bullet chart with compact numbers + delta."""
     actual = 0 if pd.isna(actual) else float(actual)
     budget = 0 if pd.isna(budget) else float(budget)
 
-    # Axis range and bands around the target
     max_axis = max(actual, budget) * 1.2 if max(actual, budget) > 0 else 1.0
-    under_hi = 0.90 * budget
-    near_hi  = 1.00 * budget
-    above_hi = 1.10 * budget
+    under_hi, near_hi, above_hi = 0.9 * budget, 1.0 * budget, 1.1 * budget
+
+    # Formatters
+    def fmt_compact(n):
+        absn = abs(n)
+        if absn >= 1e9: s = f"{n/1e9:.1f}B"
+        elif absn >= 1e6: s = f"{n/1e6:.1f}M"
+        elif absn >= 1e3: s = f"{n/1e3:.1f}K"
+        else: s = f"{n:.0f}"
+        return f"{unit}{s}" if unit else s
+
+    delta = (actual - budget) / budget * 100 if budget else 0
+    delta_symbol = f"▲ {delta:.1f}%" if delta >= 0 else f"▼ {abs(delta):.1f}%"
+    delta_color = "green" if delta >= 0 else "red"
 
     fig = go.Figure(go.Indicator(
-        mode="number+gauge+delta",
+        mode="gauge",
         value=actual,
-        number={"valueformat": ",", "font": {"size": 32}},
-        delta={
-            "reference": budget,
-            "relative": True,
-            "valueformat": ".1%",
-            "increasing": {"color": "#16a34a"},  # green
-            "decreasing": {"color": "#dc2626"},  # red
-        },
-        title={"text": f"Bullet Chart: {label}<br><span style='font-size:0.9em'>{_fmt_compact(actual, unit)} vs target {_fmt_compact(budget, unit)}</span>"},
         gauge={
             "shape": "bullet",
             "axis": {"range": [0, max_axis]},
-            # Performance bands (light -> dark)
             "steps": [
-                {"range": [0, min(under_hi, max_axis)], "color": "#fde68a"},   # under (amber)
-                {"range": [min(under_hi, max_axis), min(near_hi, max_axis)], "color": "#bbf7d0"},  # near (light green)
-                {"range": [min(near_hi, max_axis), min(above_hi, max_axis)], "color": "#86efac"},  # above (green)
+                {"range": [0, under_hi], "color": "#fde68a"},   # under (amber)
+                {"range": [under_hi, near_hi], "color": "#bbf7d0"},  # near (light green)
+                {"range": [near_hi, above_hi], "color": "#86efac"},  # above (green)
             ],
-            # Actual bar color
             "bar": {"color": "#16a34a"},
-            # Target marker (budget)
             "threshold": {
                 "line": {"color": "#111827", "width": 3},
                 "thickness": 0.9,
                 "value": min(budget, max_axis),
             },
         },
-        domain={"x": [0, 0.88], "y": [0, 1]},  # leave space on the right for number+delta
+        domain={"x": [0, 0.85], "y": [0, 1]},
     ))
 
-    # Right-side big number with compact formatting
+    # Compact value + delta on right
     fig.add_annotation(
-        x=0.94, y=0.5, xref="paper", yref="paper",
-        text=_fmt_compact(actual, unit),
-        showarrow=False, font={"size": 40, "color": "#6b7280"},
+        x=0.93, y=0.55, xref="paper", yref="paper",
+        text=f"<b>{fmt_compact(actual)}</b>",
+        showarrow=False, font={"size": 38, "color": "#374151"},
+        align="left"
+    )
+    fig.add_annotation(
+        x=0.93, y=0.25, xref="paper", yref="paper",
+        text=delta_symbol,
+        showarrow=False, font={"size": 20, "color": delta_color},
         align="left"
     )
 
     fig.update_layout(
+        title=f"{label}",
         template="plotly_white",
-        margin=dict(l=40, r=40, t=60, b=20),
-        height=220,
+        margin=dict(l=40, r=40, t=50, b=20),
+        height=180,
     )
     return fig
 
